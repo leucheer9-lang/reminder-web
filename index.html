@@ -365,6 +365,47 @@
       text-align: center;
     }
 
+    .cloud-panel {
+      padding: 14px;
+      margin-bottom: 18px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .cloud-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .cloud-title {
+      margin: 0;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .cloud-status {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .auth-form {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(150px, 220px) auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .auth-user {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
     .file-input {
       display: none;
     }
@@ -389,6 +430,10 @@
 
       .toolbar {
         display: grid;
+      }
+
+      .auth-form {
+        grid-template-columns: 1fr;
       }
 
       .search {
@@ -440,6 +485,26 @@
         <input class="file-input" id="fileInput" type="file" accept="application/json">
       </div>
     </header>
+
+    <section class="panel cloud-panel" id="cloudPanel">
+      <div class="cloud-top">
+        <div>
+          <p class="cloud-title">云端同步</p>
+          <div class="cloud-status" id="cloudStatus">正在检查云端配置...</div>
+        </div>
+        <button class="btn" id="signOutBtn" type="button" hidden>退出登录</button>
+      </div>
+      <form class="auth-form" id="authForm" hidden>
+        <input id="emailInput" type="email" placeholder="邮箱">
+        <input id="passwordInput" type="password" placeholder="密码，至少 6 位">
+        <button class="btn primary" id="signInBtn" type="submit">登录</button>
+        <button class="btn" id="signUpBtn" type="button">注册</button>
+      </form>
+      <div class="auth-user" id="authUser" hidden>
+        <span id="userEmail"></span>
+        <button class="btn" id="syncLocalBtn" type="button">把本机提醒上传到云端</button>
+      </div>
+    </section>
 
     <section class="shell">
       <form class="panel capture" id="reminderForm">
@@ -511,12 +576,27 @@
     </section>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script>
+    // 填入 Supabase Project URL 和 anon public key 后，会启用登录与云端同步。
+    const SUPABASE_URL = "https://wqvgfxjnizrahoghwqnb.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxdmdmeGpuaXpyYWhvZ2h3cW5iIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzOTM2ODEsImV4cCI6MjA5Nzk2OTY4MX0.jS0geugHsUXdlq8HFfeaUx7Dd1HDV6OWNOiJZcpllpI";
     const STORAGE_KEY = "temporary-work-reminders-v1";
     const $ = (id) => document.getElementById(id);
+    const CLOUD_ENABLED = Boolean(
+      window.supabase &&
+      SUPABASE_URL.startsWith("https://") &&
+      SUPABASE_ANON_KEY.length > 20
+    );
+    const supabaseClient = CLOUD_ENABLED
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+      : null;
 
     let reminders = loadReminders();
+    let localRemindersBeforeCloud = [...reminders];
     let activeFilter = "open";
+    let currentUser = null;
+    let isSyncing = false;
 
     const form = $("reminderForm");
     const quickText = $("quickText");
@@ -526,6 +606,11 @@
     const tag = $("tag");
     const list = $("list");
     const searchInput = $("searchInput");
+    const authForm = $("authForm");
+    const authUser = $("authUser");
+    const cloudStatus = $("cloudStatus");
+    const emailInput = $("emailInput");
+    const passwordInput = $("passwordInput");
 
     function todayAtStart() {
       const now = new Date();
@@ -556,6 +641,120 @@
 
     function saveReminders() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(reminders));
+    }
+
+    function setStatus(message) {
+      cloudStatus.textContent = message;
+    }
+
+    function toCloudRow(item) {
+      return {
+        title: item.title,
+        note: item.note,
+        due_date: item.dueDate || null,
+        due_time: item.dueTime || null,
+        priority: item.priority || "medium",
+        tag: item.tag || "",
+        done: Boolean(item.done),
+        notified_at: item.notifiedAt || null
+      };
+    }
+
+    function fromCloudRow(row) {
+      return {
+        id: row.id,
+        title: row.title,
+        note: row.note || "",
+        dueDate: row.due_date || "",
+        dueTime: row.due_time ? String(row.due_time).slice(0, 5) : "",
+        priority: row.priority || "medium",
+        tag: row.tag || "",
+        done: Boolean(row.done),
+        notifiedAt: row.notified_at || "",
+        createdAt: row.created_at || new Date().toISOString()
+      };
+    }
+
+    function isCloudReady() {
+      return CLOUD_ENABLED && currentUser;
+    }
+
+    async function loadCloudReminders() {
+      if (!isCloudReady()) return;
+      setStatus("正在同步云端提醒...");
+      const { data, error } = await supabaseClient
+        .from("reminders")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        setStatus(`云端同步失败：${error.message}`);
+        return;
+      }
+
+      reminders = (data || []).map(fromCloudRow);
+      saveReminders();
+      setStatus(`已登录：${currentUser.email}。提醒会自动同步到云端。`);
+      render();
+      checkDueNotifications();
+    }
+
+    async function createCloudReminder(item) {
+      if (!isCloudReady()) return item;
+      const { data, error } = await supabaseClient
+        .from("reminders")
+        .insert({ ...toCloudRow(item), user_id: currentUser.id })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return fromCloudRow(data);
+    }
+
+    async function updateCloudReminder(id, patch) {
+      if (!isCloudReady()) return;
+      const row = {};
+      if ("done" in patch) row.done = patch.done;
+      if ("notifiedAt" in patch) row.notified_at = patch.notifiedAt || null;
+      row.updated_at = new Date().toISOString();
+
+      const { error } = await supabaseClient
+        .from("reminders")
+        .update(row)
+        .eq("id", id);
+
+      if (error) throw error;
+    }
+
+    async function deleteCloudReminder(id) {
+      if (!isCloudReady()) return;
+      const { error } = await supabaseClient
+        .from("reminders")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+    }
+
+    async function uploadLocalReminders() {
+      if (!isCloudReady()) return;
+      const localItems = localRemindersBeforeCloud.length ? localRemindersBeforeCloud : loadReminders();
+      if (!localItems.length) {
+        alert("本机暂时没有可上传的提醒。");
+        return;
+      }
+
+      setStatus("正在上传本机提醒...");
+      const rows = localItems.map((item) => ({ ...toCloudRow(item), user_id: currentUser.id }));
+      const { error } = await supabaseClient.from("reminders").insert(rows);
+      if (error) {
+        setStatus(`上传失败：${error.message}`);
+        return;
+      }
+
+      await loadCloudReminders();
+      localRemindersBeforeCloud = [];
+      alert("已上传到云端。");
     }
 
     function parseText(text) {
@@ -603,10 +802,16 @@
       };
     }
 
-    function addReminder() {
+    async function addReminder() {
       const text = quickText.value.trim();
       if (!text) {
         quickText.focus();
+        return;
+      }
+
+      if (CLOUD_ENABLED && !currentUser) {
+        alert("请先登录，再收录到云端。");
+        emailInput.focus();
         return;
       }
 
@@ -623,15 +828,20 @@
         createdAt: new Date().toISOString()
       };
 
-      reminders.unshift(item);
-      saveReminders();
-      checkDueNotifications();
-      form.reset();
-      priority.value = "medium";
-      activeFilter = "open";
-      setActiveTab();
-      render();
-      quickText.focus();
+      try {
+        const savedItem = await createCloudReminder(item);
+        reminders.unshift(savedItem);
+        saveReminders();
+        checkDueNotifications();
+        form.reset();
+        priority.value = "medium";
+        activeFilter = "open";
+        setActiveTab();
+        render();
+        quickText.focus();
+      } catch (error) {
+        alert(`收录失败：${error.message}`);
+      }
     }
 
     function isToday(item) {
@@ -767,16 +977,35 @@
       }[char]));
     }
 
-    function toggleDone(id) {
-      reminders = reminders.map((item) => item.id === id ? { ...item, done: !item.done } : item);
+    async function toggleDone(id) {
+      const target = reminders.find((item) => item.id === id);
+      if (!target) return;
+      const nextDone = !target.done;
+      reminders = reminders.map((item) => item.id === id ? { ...item, done: nextDone } : item);
       saveReminders();
       render();
+
+      try {
+        await updateCloudReminder(id, { done: nextDone });
+      } catch (error) {
+        alert(`同步失败：${error.message}`);
+      }
     }
 
-    function deleteReminder(id) {
+    async function deleteReminder(id) {
+      const previous = reminders;
       reminders = reminders.filter((item) => item.id !== id);
       saveReminders();
       render();
+
+      try {
+        await deleteCloudReminder(id);
+      } catch (error) {
+        reminders = previous;
+        saveReminders();
+        render();
+        alert(`删除失败：${error.message}`);
+      }
     }
 
     async function requestNotificationPermission() {
@@ -805,10 +1034,12 @@
       }
     }
 
-    function checkDueNotifications() {
+    async function checkDueNotifications() {
+      if (isSyncing) return;
       const dueItems = reminders.filter(isDueForNotification);
       if (!dueItems.length) return;
 
+      isSyncing = true;
       const now = new Date().toISOString();
       for (const item of dueItems) {
         showDueNotification(item);
@@ -820,6 +1051,16 @@
       });
       saveReminders();
       render();
+
+      try {
+        if (isCloudReady()) {
+          await Promise.all(dueItems.map((item) => updateCloudReminder(item.id, { notifiedAt: now })));
+        }
+      } catch (error) {
+        setStatus(`提醒状态同步失败：${error.message}`);
+      } finally {
+        isSyncing = false;
+      }
     }
 
     function setActiveTab() {
@@ -840,13 +1081,20 @@
 
     function importData(file) {
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const data = JSON.parse(reader.result);
           if (!Array.isArray(data)) throw new Error("invalid");
-          reminders = data;
-          saveReminders();
-          render();
+          if (isCloudReady()) {
+            const rows = data.map((item) => ({ ...toCloudRow(item), user_id: currentUser.id }));
+            const { error } = await supabaseClient.from("reminders").insert(rows);
+            if (error) throw error;
+            await loadCloudReminders();
+          } else {
+            reminders = data;
+            saveReminders();
+            render();
+          }
         } catch {
           alert("导入失败，请选择有效的提醒备份文件。");
         }
@@ -854,10 +1102,113 @@
       reader.readAsText(file);
     }
 
+    function renderAuthState() {
+      if (!CLOUD_ENABLED) {
+        authForm.hidden = true;
+        authUser.hidden = true;
+        $("signOutBtn").hidden = true;
+        setStatus("云端同步尚未配置。当前仍可本地使用；配置 Supabase 后可跨设备同步。");
+        return;
+      }
+
+      if (!currentUser) {
+        authForm.hidden = false;
+        authUser.hidden = true;
+        $("signOutBtn").hidden = true;
+        setStatus("请输入邮箱和密码登录。新用户先点注册。");
+        return;
+      }
+
+      authForm.hidden = true;
+      authUser.hidden = false;
+      $("signOutBtn").hidden = false;
+      $("userEmail").textContent = `已登录：${currentUser.email}`;
+    }
+
+    async function signIn() {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || !password) {
+        alert("请填写邮箱和密码。");
+        return;
+      }
+
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) {
+        alert(`登录失败：${error.message}`);
+        return;
+      }
+
+      currentUser = data.user;
+      renderAuthState();
+      await loadCloudReminders();
+    }
+
+    async function signUp() {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || password.length < 6) {
+        alert("请填写邮箱，密码至少 6 位。");
+        return;
+      }
+
+      const { data, error } = await supabaseClient.auth.signUp({ email, password });
+      if (error) {
+        alert(`注册失败：${error.message}`);
+        return;
+      }
+
+      if (data.user && data.session) {
+        currentUser = data.user;
+        renderAuthState();
+        await loadCloudReminders();
+      } else {
+        alert("注册成功。请按邮箱里的确认链接完成验证，然后回来登录。");
+      }
+    }
+
+    async function signOut() {
+      if (CLOUD_ENABLED) await supabaseClient.auth.signOut();
+      currentUser = null;
+      reminders = loadReminders();
+      renderAuthState();
+      render();
+    }
+
+    async function initCloud() {
+      renderAuthState();
+      if (!CLOUD_ENABLED) return;
+
+      const { data } = await supabaseClient.auth.getSession();
+      currentUser = data.session?.user || null;
+      renderAuthState();
+
+      if (currentUser) {
+        await loadCloudReminders();
+      }
+
+      supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+        currentUser = session?.user || null;
+        renderAuthState();
+        if (currentUser) {
+          await loadCloudReminders();
+        }
+      });
+    }
+
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       addReminder();
     });
+
+    authForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      signIn();
+    });
+
+    $("signUpBtn").addEventListener("click", signUp);
+    $("signOutBtn").addEventListener("click", signOut);
+    $("syncLocalBtn").addEventListener("click", uploadLocalReminders);
 
     $("parseBtn").addEventListener("click", () => {
       const parsed = parseText(quickText.value);
@@ -885,6 +1236,7 @@
     });
 
     render();
+    initCloud();
     checkDueNotifications();
     setInterval(checkDueNotifications, 30000);
     document.addEventListener("visibilitychange", () => {
