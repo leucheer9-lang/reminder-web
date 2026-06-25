@@ -425,6 +425,10 @@
         <p class="subtitle">把零散工作先收进来，再按今天、逾期、已完成慢慢清掉。</p>
       </div>
       <div class="header-actions">
+        <button class="btn" id="notifyBtn" title="开启浏览器提醒">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          开启提醒
+        </button>
         <button class="btn" id="exportBtn" title="导出备份">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
           导出
@@ -621,6 +625,7 @@
 
       reminders.unshift(item);
       saveReminders();
+      checkDueNotifications();
       form.reset();
       priority.value = "medium";
       activeFilter = "open";
@@ -648,6 +653,11 @@
     function isOverdue(item) {
       const due = dueDateTime(item);
       return !item.done && due && due < new Date();
+    }
+
+    function isDueForNotification(item) {
+      const due = dueDateTime(item);
+      return !item.done && !item.notifiedAt && item.dueDate && item.dueTime && due && due <= new Date();
     }
 
     function formatDue(item) {
@@ -769,6 +779,49 @@
       render();
     }
 
+    async function requestNotificationPermission() {
+      if (!("Notification" in window)) {
+        alert("这个浏览器不支持系统通知。页面打开时，我仍会用弹窗提醒你。");
+        return;
+      }
+
+      if (Notification.permission === "granted") {
+        alert("浏览器提醒已经开启。保持页面打开，到点会弹出通知。");
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      alert(permission === "granted"
+        ? "浏览器提醒已开启。保持页面打开，到点会弹出通知。"
+        : "你还没有允许通知。到点时只能在页面打开状态下用普通弹窗提醒。");
+    }
+
+    function showDueNotification(item) {
+      const body = `${formatDue(item)} ${item.tag ? "｜" + item.tag : ""}`;
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification(item.title || "临时工作提醒", { body });
+      } else {
+        alert(`临时工作提醒\n\n${item.title}\n${body}`);
+      }
+    }
+
+    function checkDueNotifications() {
+      const dueItems = reminders.filter(isDueForNotification);
+      if (!dueItems.length) return;
+
+      const now = new Date().toISOString();
+      for (const item of dueItems) {
+        showDueNotification(item);
+      }
+
+      reminders = reminders.map((item) => {
+        if (!dueItems.some((dueItem) => dueItem.id === item.id)) return item;
+        return { ...item, notifiedAt: now };
+      });
+      saveReminders();
+      render();
+    }
+
     function setActiveTab() {
       document.querySelectorAll(".tab").forEach((tab) => {
         tab.classList.toggle("active", tab.dataset.filter === activeFilter);
@@ -822,6 +875,7 @@
     });
 
     searchInput.addEventListener("input", render);
+    $("notifyBtn").addEventListener("click", requestNotificationPermission);
     $("exportBtn").addEventListener("click", exportData);
     $("importBtn").addEventListener("click", () => $("fileInput").click());
     $("fileInput").addEventListener("change", (event) => {
@@ -831,6 +885,11 @@
     });
 
     render();
+    checkDueNotifications();
+    setInterval(checkDueNotifications, 30000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) checkDueNotifications();
+    });
   </script>
 </body>
 </html>
